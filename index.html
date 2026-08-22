@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Racing+Sans+One&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<!-- ===== MARKUP ===== -->
+<div class="lb" id="lb">
+  <div class="lb__head">
+    <span class="lb__live" id="lbLive" style="display:none"><span class="lb__dot"></span>Live</span>
+    <div class="lb__titlesection">
+      <h1 class="lb__title"><span id="lbTitleName">RallySprint</span> <span id="lbTitleSub">· Qualifying</span></h1>
+      <div class="lb__date" id="lbDate">22nd, August, 2026</div>
+    </div>
+    <div class="lb__headright">
+      <img class="lb__logo" src="assets/vr-logo.svg" alt="Vaucluse Raceway" loading="eager">
+      <div class="lb__updated" id="lbUpdated" style="display:none"><span class="udot"></span><span id="lbUpdatedTxt">—</span></div>
+    </div>
+  </div>
+
+  <div class="lb__tabs" id="lbTabs">
+    <button class="lb__tab active" data-view="0">Qualifying</button>
+    <button class="lb__tab" data-view="1">Knockouts</button>
+  </div>
+  <div class="lb__err" id="lbErr"></div>
+
+  <div class="lb__views loading" id="lbViews">
+    <div class="lb__spinner" id="lbSpinner">
+      <div class="lb__spinring"></div>
+      <span>Loading results…</span>
+    </div>
+    <section class="view" id="lbQualifying">
+      <section class="view" id="lbOverall">
+        <div class="lb__viewlabel">Overall Fastest</div>
+        <div class="lb__colhead"><span>Pos</span><span>No.</span><span>Driver</span><span class="r">Best Time</span></div>
+        <div class="lb__list" id="lbList"></div>
+      </section>
+      <section class="view" id="lbHeats">
+        <div class="lb__viewlabel">By Heats</div>
+        <div class="lb__heatgrid" id="lbHeatGrid"></div>
+      </section>
+    </section>
+    <section class="view hide" id="lbKnockouts">
+      <div class="lb__viewlabel">Knockouts</div>
+      <!-- Buttons are generated from CONFIG.knockouts.categories in script.js
+           (filtered by the Settings tab's "Show <category>" toggles). -->
+      <div class="lb__kcat" id="lbKcatBtns"></div>
+      <div class="lb__bracket" id="lbBracket"></div>
+    </section>
+  </div>
+
+  <div class="lb__ktvlabel" id="lbKtvLabel"></div>
+
+  <div class="lb__foot">
+    All times are provisional until the end of the event.
+  </div>
+  <!-- Ad playback overlay. Filled from the ads/ folder while the Settings sheet's
+       "Play Ads" is Yes; covers everything except the Exit TV button. -->
+  <div class="lb__ads" id="lbAds" aria-hidden="true">
+    <img class="lb__adimg" id="lbAdImg" alt="">
+    <video class="lb__advid" id="lbAdVid" muted playsinline preload="auto"></video>
+  </div>
+
+  <button class="lb__tvexit" id="lbTvExit">✕ Exit TV</button>
+
+  <div class="lb__credit">
+    <a class="lb__creditlink" href="https://emdesignsbb.com" target="_blank" rel="noopener">
+      <span>Designed and Developed by</span>
+      <img src="https://emdesignsbb.com/assets/images/image01.png" alt="EMDesigns" loading="lazy">
+    <span> www.emdesignsbb.com </span>
+    </a>
+  </div>
+
+  <!-- TV build: full-screen launcher. Clicking it enters fullscreen TV mode
+       (a real user gesture, so fullscreen is allowed). -->
+  <div class="lb__start" id="lbStart">
+    <img class="lb__startlogo" src="assets/vr-logo.svg" alt="Vaucluse Raceway">
+    <button class="lb__startbtn" id="lbStartBtn">▶ Start TV</button>
+    <div class="lb__starthint">Press <b>Enter</b> to switch Qualifying ⟷ Knockouts &nbsp;·&nbsp; <b>Esc</b> to exit</div>
+  </div>
+</div>
+
+<script src="script.js"></script>
+</body>
+</html>
