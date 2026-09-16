@@ -11,6 +11,9 @@
     // re-read on every poll — flipping the cell retargets a running TV session.
     qfTvSideBySide: true,
     qfTvCycleMs: 12000,   // dwell per view when cycling (matches Knockout TV)
+    // When a heat's time lands, that heat is held full-size on its own for this
+    // long before the grid fades back. TV mode only.
+    heatSpotMs: 15000,
     // Which TV view is on screen: 'qualifying' | 'knockouts' | null (unset).
     // Driven by the "Display" key in the Settings sheet — the remote equivalent of
     // pressing Enter. Applied when the sheet VALUE CHANGES, not on every poll, so a
@@ -41,7 +44,7 @@
       // Driver = same row, +1 column.  Time = same row, +2 columns.
       // Adjust rows to match your actual sheet. W = winner car-number cell (optional).
       categories: [
-        { name: 'BimmaCup', gid: '2038855303', fetchRange: 'H7:X37',
+        { name: 'BimmaCup', gid: '2038855303',
           rounds: {
             R16: [
               { match:8, slot1:'H7', slot2:'H9' },
@@ -68,7 +71,7 @@
             W:  'X22',
           }
         },
-        { name: 'BimmaCup Jr.', gid: '1123204078', fetchRange: 'C7:S37',
+        { name: 'BimmaCup Jr.', gid: '1123204078',
           rounds: {
             R16: [
               { match:8, slot1:'C7',   slot2:'C9'   },
@@ -94,7 +97,7 @@
             W:  'S22',
           }
         },
-        { name: 'Touring', gid: '1830775932', fetchRange: 'C7:S37',
+        { name: 'Touring', gid: '1830775932',
           rounds: {
             R16: [
               { match:8, slot1:'C7',   slot2:'C9'   },
@@ -120,7 +123,7 @@
             W:  'S22',
           }
         },
-        { name: 'AWD', gid: '2111958111', fetchRange: 'H7:X37',
+        { name: 'AWD', gid: '2111958111',
           rounds: {
             R16: [
               { match:8, slot1:'H7',   slot2:'H9'   },
@@ -156,7 +159,7 @@
       range: 'B5:V66',
       runLabels: ['Qualifying 1','Qualifying 2','Qualifying 3','Qualifying 4'],
       // Column indexes WITHIN the range (0 = first col of the range):
-      heatCol: 0,                      // the "Heat" number column
+      heatCol: 1,                      // the "Heat" number column (C, i.e. range B..V index 1)
       blocks: [                        // one per qualifying run → [number, driver, time] columns
         { num: 2, driver: 3, time: 4 },
         { num: 7, driver: 8, time: 9 },
@@ -172,7 +175,7 @@
   const ALL_CATEGORIES = CONFIG.knockouts.categories.slice();
 
   /* ===== TIME HELPERS ===== */
-  function parseTime(v){
+  function parseTimeRaw(v){
     if(v==null||v==='') return null;
     if(typeof v==='number'&&!isNaN(v)) return Math.round(v*1000);
     const s=String(v).trim(); if(!s||/^(dnf|dns|dsq|—|-)$/i.test(s)) return null;
@@ -183,6 +186,21 @@
     else if(p.length===2){ if(/\./.test(s)&&!/:/.test(s)){ sec=+p[0]; ms=+padMs(p[1]); } else { min=+p[0]; sec=+p[1]; } }
     else sec=+p[0];
     return ((min*60)+sec)*1000+ms;
+  }
+  /* Single choke point for every time read off the sheet. A faulted timer writes
+     0:00:000 into cells; left alone those sort straight to the top of the
+     leaderboard and win their bracket match. Every caller already handles null,
+     so rejecting non-positive times here covers leaderboard sorting, fastest-lap
+     markers, heat-best highlighting and the bracket ADV/winner comparisons. */
+  function parseTime(v){
+    var n=parseTimeRaw(v);
+    return (typeof n==='number'&&isFinite(n)&&n>0)?n:null;
+  }
+  /* Bracket slots print the RAW cell text, so they need their own check. Kept
+     deliberately separate from parseTime so genuine DNF/DNS text still shows. */
+  function isZeroTime(v){
+    var s=String(v==null?'':v).trim();
+    return /^[0:.]+$/.test(s)&&s.indexOf('0')>=0;
   }
   function fmtTime(ms){ if(ms==null) return '—'; let t=Math.round(ms);
     const m=Math.floor(t/60000); t-=m*60000; const s=Math.floor(t/1000), mm=t-s*1000;
@@ -208,10 +226,13 @@
   /* ===== DRIVER → CLASS MAP (separate tab on the main sheet) ===== */
   function loadClassMap(){
     const cf=CONFIG.classFilter; if(!cf||!cf.gid) return;
-    const dIdx=cellToIndex(cf.driverColumn+'1').col, cIdx=cellToIndex(cf.classColumn+'1').col;
-    loadOneRound(cf.gid, 'A1:Z200', rows=>{
-      if(!rows) return; const map={};
-      rows.forEach(r=>{ const cells=r.c||[];
+    loadOneRound(cf.gid, table=>{
+      if(!table) return; const map={};
+      // Columns by the ids gviz reports, so a blank leading column cannot shift them.
+      const colIdx={}; (table.cols||[]).forEach((col,i)=>{ if(col&&col.id) colIdx[col.id]=i; });
+      const dIdx=colIdx[cf.driverColumn], cIdx=colIdx[cf.classColumn];
+      if(dIdx==null||cIdx==null) return;
+      (table.rows||[]).forEach(r=>{ const cells=r.c||[];
         const drv=String(cellVal(cells[dIdx])).trim(), cls=String(cellVal(cells[cIdx])).trim();
         if(!drv||!cls) return;
         if(/^class(es)?$/i.test(cls)||/^(category|categories)$/i.test(cls)||/^driver(\s*name)?$/i.test(drv)||/^name$/i.test(drv)) return;
@@ -268,9 +289,23 @@
     if(tvOn) scaleTvList();
   }
 
+  /* The board shows ONE qualifying run at a time: whichever is currently being
+     timed, i.e. the LAST run carrying any time. The moment the first Qualifying 2
+     time lands the board moves off Qualifying 1. Before any time exists at all the
+     first run with rows is shown, so the grid is never blank while a field stages.
+     Only the on-screen grid is narrowed — Overall Fastest still derives from every
+     run, so earlier rounds keep counting towards a driver's best. */
+  function currentRun(runs){
+    const hasTime=r=>r.heats.some(h=>h.entries.some(e=>e.ms!=null));
+    for(let i=runs.length-1;i>=0;i--) if(hasTime(runs[i])) return runs[i];
+    return runs.find(r=>r.heats.length)||null;
+  }
+
   /* ===== RENDER HEATS GRID ===== */
-  function renderHeats(runs){
+  function renderHeats(allRuns){
     grid.innerHTML='';
+    const live=currentRun(allRuns);
+    const runs=live?[live]:[];
     // Up to 3 runs sit in a single row; 4+ wrap into two rows (4 runs → 2×2) so the
     // columns stay wide enough to read rather than being sliced ever thinner.
     const cols = runs.length<=3 ? Math.max(1,runs.length) : Math.ceil(runs.length/2);
@@ -279,9 +314,11 @@
     runs.forEach(run=>{
       let runBest=Infinity; run.heats.forEach(h=>h.entries.forEach(e=>{ if(e.ms!=null&&e.ms<SENTINEL_MS&&e.ms<runBest) runBest=e.ms; }));
       const col=document.createElement('div'); col.className='lb__hcol';
-      let html=`<div class="lb__hcolhead"><span>${run.label}</span><span class="t">Time</span></div>`;
-      run.heats.forEach(h=>{
-        html+=`<div class="lb__heat"><div class="lb__heatno">${h.heat}</div><div class="lb__hpair">`;
+      let html=`<div class="lb__hcolhead"><span>${run.label}</span></div>`;
+      // The heats sit in two columns under the one full-width header. Build each
+      // heat's markup on its own so the list can be split down the middle below.
+      const heatHtml=run.heats.map(h=>{
+        let html=`<div class="lb__heat"><div class="lb__heatno">${h.heat}</div><div class="lb__hpair">`;
         const heatBest=h.entries.reduce((b,e)=>(e.ms!=null&&e.ms<SENTINEL_MS&&(b===null||e.ms<b))?e.ms:b, null);
         h.entries.forEach(e=>{
           const key=run.label+'|'+e.num, changed=prevHeatMs[key]!=null&&prevHeatMs[key]!==e.ms; prevHeatMs[key]=e.ms;
@@ -291,11 +328,93 @@
           html+=`<div class="lb__hentry${changed?' flash':''}${isHeatFastest?' heat-best':''}"><span class="lb__hnum">${e.num}</span>`+
             `<span class="lb__hdrv">${e.driver}</span><span class="lb__htime ${cls}">${dnf?'—':fmtTime(e.ms)}</span></div>`;
         });
-        html+=`</div></div>`;
+        return html+`</div></div>`;
       });
+      // Split down the middle so heats read top-to-bottom in the left column, then
+      // continue down the right — the odd heat out goes to the left column.
+      const half=Math.ceil(heatHtml.length/2);
+      const group=h=>`<div class="lb__hgroup">${h.join('')}</div>`;
+      html+=`<div class="lb__hbody">`+(heatHtml.length>1
+        ? group(heatHtml.slice(0,half))+group(heatHtml.slice(half))
+        : group(heatHtml))+`</div>`;
       col.innerHTML=html; grid.appendChild(col);
     });
+    // Every run is checked, not just the live one, so a run's heats are already on
+    // record by the time it goes live — otherwise its opening heat would be seeded
+    // silently and never spotlighted. Only the live run can actually raise one.
+    // This also runs off TV, keeping signatures current so entering TV mid-session
+    // doesn't replay heats that landed while it was off.
+    let fresh=null;
+    allRuns.forEach(r=>{ const f=checkNewHeat(r); if(f&&live&&r.label===live.label) fresh=f; });
+    heatSigSeeded=true;
+    if(tvOn&&fresh) showHeatSpot(fresh.run,fresh.heat);
     if(tvOn) scaleTvHeats();
+  }
+
+  /* ===== NEW-HEAT SPOTLIGHT =====
+     When a heat posts a time, the grid fades out and that heat is held on its own
+     for CONFIG.heatSpotMs, then fades back. TV only: off TV the overlay has no
+     fixed height to fill, and the browser view is the operator's console anyway. */
+  const spot=el('lbHeatSpot'), heats=el('lbHeats');
+  let prevHeatSig={};      // run|heat → {sig, n} as last seen
+  let heatSigSeeded=false; // first pass only records; nothing is "new" on load
+  let spotTimer=null, spotKey=null;
+
+  const realTimes=h=>h.entries.filter(e=>e.ms!=null&&e.ms<SENTINEL_MS).length;
+
+  /* Returns the heat that most recently gained a time, or null. A heat counts as
+     new only when it holds MORE real times than last poll — an edited time, or a
+     driver scratched to DNF, must not re-trigger a heat already shown. A heat never
+     seen before starts from zero, so a heat that appears already timed does count;
+     the heatSigSeeded gate is what stops the first load replaying the whole sheet.
+     Heats are walked in ascending order, so when two land in one poll the later
+     one wins. */
+  function checkNewHeat(run){
+    let fresh=null;
+    run.heats.forEach(h=>{
+      const key=run.label+'|'+h.heat;
+      const sig=h.entries.map(e=>e.ms==null?'':e.ms).join(','), n=realTimes(h);
+      const prev=prevHeatSig[key]||{sig:'',n:0};
+      prevHeatSig[key]={sig:sig,n:n};
+      if(!heatSigSeeded) return;
+      if(sig!==prev.sig&&n>prev.n) fresh={run:run,heat:h};
+    });
+    return fresh;
+  }
+
+  /* A second time landing in the same heat refreshes the card in place and extends
+     the hold rather than re-opening it; a different heat takes it over outright. */
+  function showHeatSpot(run,h){
+    const key=run.label+'|'+h.heat, reopen=spotKey!==key||!spotTimer;
+    spotKey=key;
+    const best=h.entries.reduce((b,e)=>(e.ms!=null&&e.ms<SENTINEL_MS&&(b===null||e.ms<b))?e.ms:b,null);
+    spot.innerHTML=`<div class="lb__spotcard"><div class="lb__spothead">${run.label} &middot; Heat ${h.heat}</div>`+
+      h.entries.map(e=>{
+        const dnf=e.ms==null||e.ms>=SENTINEL_MS, win=!dnf&&best!==null&&e.ms===best;
+        return `<div class="lb__spotrow${win?' win':''}"><span class="lb__spotnum">${e.num}</span>`+
+          `<span class="lb__spotdrv">${e.driver}</span>`+
+          `<span class="lb__spottime">${dnf?'—':fmtTime(e.ms)}</span></div>`;
+      }).join('')+`</div>`;
+    if(reopen){
+      heats.classList.add('spotting');
+      // The Overall/Heats crossfade would swap views mid-hold, so it is paused for
+      // the duration and picked up again in hideHeatSpot().
+      if(tvQfInterval){ clearInterval(tvQfInterval); tvQfInterval=null; setTvQf(1); }
+      requestAnimationFrame(()=>spot.classList.add('show'));
+    }
+    clearTimeout(spotTimer);
+    spotTimer=setTimeout(hideHeatSpot, CONFIG.heatSpotMs);
+  }
+
+  function hideHeatSpot(){
+    clearTimeout(spotTimer); spotTimer=null; spotKey=null;
+    spot.classList.remove('show'); heats.classList.remove('spotting');
+    setTimeout(()=>{ if(!spotTimer) spot.innerHTML=''; }, 600);
+    // Resume the cycle ON the heats grid. Restarting it from the top would flip to
+    // Overall Fastest the instant the spotlight faded, which reads as a glitch.
+    if(tvOn&&!CONFIG.qfTvSideBySide&&!tvQfInterval){
+      tvQfInterval=setInterval(()=>setTvQf((tvQfCat+1)%2), CONFIG.qfTvCycleMs);
+    }
   }
 
   function hideLoading(){
@@ -326,25 +445,41 @@
       const rows=resp.table.rows||[];
       const getVal=(r,c)=>{ if(c==null) return ''; const cell=rows[r]&&rows[r].c&&rows[r].c[c]; if(!cell) return ''; return cell.f!=null?cell.f:(cell.v!=null?String(cell.v):''); };
       const runs=h.runLabels.map(l=>({label:l, heats:[]}));
-      let curHeat=''; const rowsByHeat={};
+      const rowsByHeat={};
+      // Heat numbers are counted per run, NOT read off the shared heat column. That
+      // one column is aligned to Qualifying 1's rows, so a later run whose drivers
+      // sit on different rows inherited the wrong labels from it — Q3's Kurt and
+      // Jason share heat 1 in the sheet but came out as heats 1 and 2. Every
+      // entriesPerHeat drivers found down a run's own columns make one heat,
+      // numbered 1, 2, 3… The column is still read, but only to mark where the
+      // grid starts so heading rows above it are skipped.
+      const per=h.entriesPerHeat||2, seen=[];
+      let started=false;
       for(let r=0;r<rows.length;r++){
-        const hn=String(getVal(r,h.heatCol)||'').trim(); if(hn) curHeat=hn;
-        if(!curHeat) continue;
+        if(String(getVal(r,h.heatCol)||'').trim()) started=true;
+        if(!started) continue;
         h.blocks.forEach((b,bi)=>{
           const num=String(getVal(r,b.num)||'').trim(), drv=String(getVal(r,b.driver)||'').trim();
           if(!drv&&!num) return;
+          const n=seen[bi]||0; seen[bi]=n+1;
+          const heat=String(Math.floor(n/per)+1);
           if(!rowsByHeat[bi]) rowsByHeat[bi]={};
-          if(!rowsByHeat[bi][curHeat]) rowsByHeat[bi][curHeat]=[];
-          rowsByHeat[bi][curHeat].push({num,driver:drv,ms:parseTime(getVal(r,b.time))});
+          if(!rowsByHeat[bi][heat]) rowsByHeat[bi][heat]=[];
+          rowsByHeat[bi][heat].push({num,driver:drv,ms:parseTime(getVal(r,b.time))});
         });
       }
       h.blocks.forEach((b,bi)=>{ const map=rowsByHeat[bi]||{};
         Object.keys(map).forEach(hn=>runs[bi].heats.push({heat:hn,entries:map[hn]})); });
-      // A qualifying run with nothing in the sheet (e.g. no Qualifying 4 at this
-      // event) is dropped entirely rather than rendered as an empty column.
-      // The first run is always kept so the grid never collapses to nothing.
-      const used=runs.filter((r,i)=> i===0 || r.heats.length>0);
-      cb(used);
+      // A qualifying run with nothing in the sheet is dropped rather than
+      // rendered as an empty column. The LAST run additionally needs at least one
+      // real time: a pre-loaded Qualifying 4 entry list would otherwise earn a
+      // permanently blank column at an event that only runs three rounds.
+      // Keyed off the last entry in runLabels, so a future Qualifying 5 inherits
+      // the rule. Q1-Q3 are never time-gated — that would hide a round while it
+      // is staging or part-way through its first heat.
+      const lastRun=h.runLabels.length-1;
+      cb(runs.filter((run,i)=> run.heats.length &&
+        (i!==lastRun || run.heats.some(ht=>ht.entries.some(e=>e.ms!=null)))));
     };
     script.onerror=function(){ delete window[cbName]; script.remove();
       el('lbErr').textContent='Could not reach data'; hideLoading(); markUpdated(false,false); };
@@ -534,7 +669,7 @@
     appliedQfSideBySide=null; applyQfLayout(); applyAdsMode();
     showTvExit(); requestAnimationFrame(()=>{ scaleTvList(); scaleTvHeats(); }); if(root.requestFullscreen) root.requestFullscreen().catch(()=>{}); }
   // keepFs means we're switching Qualifying⟷Knockout TV, so ads carry on uninterrupted.
-  function exitTV(keepFs){ tvOn=false; root.classList.remove('tv'); stopQfCycle(); appliedQfSideBySide=null; list.style.zoom=''; grid.style.zoom=''; clearTimeout(tvHideTimer); tvExit.classList.remove('show'); if(!keepFs){ applyAdsMode(); if(document.fullscreenElement) document.exitFullscreen().catch(()=>{}); } }
+  function exitTV(keepFs){ tvOn=false; hideHeatSpot(); root.classList.remove('tv'); stopQfCycle(); appliedQfSideBySide=null; list.style.zoom=''; grid.style.zoom=''; clearTimeout(tvHideTimer); tvExit.classList.remove('show'); if(!keepFs){ applyAdsMode(); if(document.fullscreenElement) document.exitFullscreen().catch(()=>{}); } }
   document.addEventListener('mousemove',()=>{ if(tvOn||ktvOn) showTvExit(); });
   // TV build: a single "Start TV" launcher (a real user click → fullscreen is allowed).
   const startScreen=el('lbStart');
@@ -586,55 +721,97 @@
   function colLetter(n){ let s='',k=n+1;
     while(k>0){s=String.fromCharCode(65+(k-1)%26)+s; k=Math.floor((k-1)/26);} return s; }
 
-  /* --- JSONP fetch for a sheet range --- */
-  function loadOneRound(gid, range, cb){
-    const base=`https://docs.google.com/spreadsheets/d/${CONFIG.sheetId}/gviz/tq?gid=${gid}&range=${range}`;
+  /* --- JSONP fetch for a whole class tab ---
+     Deliberately sent with NO `range` parameter. The gviz tq endpoint omits every
+     row that is blank across the REQUESTED range — not just leading or trailing
+     rows, ones in the middle too — and hands back no row numbers, so any code
+     that indexes by (sheetRow - rangeStart) shifts by a cumulative amount below
+     each dropped row. Asking for the whole tab means a row only disappears if it
+     is blank across all ~63 columns, and the helper columns either side of the
+     bracket keep every bracket row alive.
+     cb(table) rather than cb(rows) so the caller can map columns by the ids gviz
+     reports instead of by offset from a range origin. */
+  function loadOneRound(gid, cb){
+    const base=`https://docs.google.com/spreadsheets/d/${CONFIG.sheetId}/gviz/tq?gid=${gid}&headers=0&tq=select%20*`;
     const cbName='__gvizKo'+(++_gvizSeq);
     const script=document.createElement('script');
-    window[cbName]=function(resp){ delete window[cbName]; script.remove(); cb(resp.status==='ok'?(resp.table.rows||[]):null); };
+    window[cbName]=function(resp){ delete window[cbName]; script.remove(); cb(resp&&resp.status==='ok'?resp.table:null); };
     script.onerror=function(){ delete window[cbName]; script.remove(); cb(null); };
-    script.src=base+'&headers=0&tqx=out:json;responseHandler:'+cbName;
+    script.src=base+'&tqx=out:json;responseHandler:'+cbName;
     document.head.appendChild(script);
   }
 
-  /* --- One fetch per category covering the entire bracket range --- */
+  const KO_HEADER_RE  = /round\s*of\s*16/i;
+  const KO_HEADER_ROW = 5;            // every class tab carries the round header on row 5
+  const KO_FINAL_RE   = /^final$/i;   // the sheet's own label above the first finalist
+
+  /* --- One fetch per category covering the whole tab --- */
   function loadOneKnockoutTab(catCfg, cb){
     const ROUND_KEYS=['R16','QF','SF','F'];
-    if(!catCfg.fetchRange){ cb({name:catCfg.name, rounds:{}}); return; }
 
-    const m=catCfg.fetchRange.match(/^([A-Za-z]+)(\d+)/);
-    if(!m){ cb({name:catCfg.name, rounds:{}}); return; }
-    const originCol=cellToIndex(m[1]+'1').col, originRow=parseInt(m[2])-1;
+    let fetchedRows=[], colIdx={}, rowShift=0;
 
-    let fetchedRows=[];
+    const cellText=(row,c)=>{ const cell=row&&row.c&&row.c[c]; if(cell==null) return '';
+      return String(cell.f!=null?cell.f:(cell.v!=null?cell.v:'')).trim(); };
+    const rowHas=(row,re)=>((row&&row.c)||[]).some((c,i)=>c&&re.test(cellText(row,i)));
+
+    /* 'T14' → the cell's text, corrected for any rows gviz dropped above it. */
     function readCell(ref){
       if(!ref) return ''; const p=cellToIndex(ref); if(!p) return '';
-      const r=p.row-originRow, c=p.col-originCol; if(r<0||c<0) return '';
-      const row=fetchedRows[r]; if(!row||!row.c||row.c[c]==null) return '';
-      const cell=row.c[c]; return String(cell.f!=null?cell.f:(cell.v!=null?cell.v:'')).trim();
+      const c=colIdx[colLetter(p.col)]; if(c==null) return '';
+      return cellText(fetchedRows[p.row+rowShift], c);
     }
-    function colShift(ref,n){ const p=cellToIndex(ref); if(!p) return ''; return colLetter(p.col+n)+(p.row+1); }
+    /* 'T14' +1 col → 'U14';  'T14' -2 rows → 'T12' */
+    function shiftRef(ref,dc,dr){ const p=cellToIndex(ref); if(!p) return '';
+      return colLetter(p.col+dc)+(p.row+1+dr); }
+    /* Car number, driver (+1 col), time (+2 cols). Slots print the raw cell text,
+       so a faulted 0:00:000 is blanked here rather than shown as a real time. */
+    function slotAt(ref){ const tm=readCell(shiftRef(ref,2,0));
+      return {car:readCell(ref), driver:readCell(shiftRef(ref,1,0)), time:isZeroTime(tm)?'':tm}; }
 
-    loadOneRound(catCfg.gid, catCfg.fetchRange, rows=>{
-      fetchedRows=rows||[];
+    loadOneRound(catCfg.gid, table=>{
+      fetchedRows=(table&&table.rows)||[];
+
+      // Map column letters from the ids gviz reports (cols[i].id is a real letter
+      // A, B, … BK), never from an offset into a requested range.
+      colIdx={}; ((table&&table.cols)||[]).forEach((col,i)=>{ if(col&&col.id) colIdx[col.id]=i; });
+
+      // A row blank across the ENTIRE tab is still dropped, so re-find the round
+      // header and correct every read by the residual shift.
+      const hIdx=fetchedRows.findIndex(row=>rowHas(row,KO_HEADER_RE));
+      rowShift = hIdx>=0 ? hIdx-(KO_HEADER_ROW-1) : 0;
+
+      // Misalignment guard. The sheet labels its own Final two rows above the
+      // first finalist, one column right of the car number. If that label is in
+      // the response but NOT where the config expects it, rows have gone missing
+      // and nothing below lines up — better to say so than to render names
+      // against the wrong matches. Tabs carrying no labels at all skip the check.
+      const finalDef=(catCfg.rounds.F||[])[0];
+      if(finalDef && fetchedRows.some(row=>rowHas(row,KO_FINAL_RE))
+         && !KO_FINAL_RE.test(readCell(shiftRef(finalDef.slot1,1,-2)))){
+        cb({name:catCfg.name, rounds:{}, error:'Bracket rows do not line up with the sheet.'}); return;
+      }
 
       const roundResults={};
       ROUND_KEYS.forEach(rk=>{
         const defs=catCfg.rounds[rk]; if(!Array.isArray(defs)) return;
-        roundResults[rk]=defs.map(d=>({match:d.match,
-          slot1:{car:readCell(d.slot1), driver:readCell(colShift(d.slot1,1)), time:readCell(colShift(d.slot1,2))},
-          slot2:{car:readCell(d.slot2), driver:readCell(colShift(d.slot2,1)), time:readCell(colShift(d.slot2,2))}}));
+        roundResults[rk]=defs.map(d=>({match:d.match, slot1:slotAt(d.slot1), slot2:slotAt(d.slot2)}));
       });
 
       let winnerCar='';
       if(typeof catCfg.rounds.W==='string') winnerCar=readCell(catCfg.rounds.W);
 
+      // Which rounds to show is decided by where the bracket STARTED, not by which
+      // cells happen to be filled. Skip rounds before the first one carrying data
+      // (an 8-car field genuinely has no Round of 16), then render every round from
+      // there on IN FULL, empty slots included — each round column divides its
+      // height evenly among its matches, so dropping the ones the sheet has not
+      // filled in yet makes the survivors close ranks and stop lining up with the
+      // round they feed. Empty slots already render as "TBD".
+      const hasData=rk=>(roundResults[rk]||[]).some(m=>m.slot1.car||m.slot1.driver||m.slot2.car||m.slot2.driver);
+      const firstLive=ROUND_KEYS.findIndex(hasData);
       const rounds={};
-      ROUND_KEYS.forEach(rk=>{
-        const list=roundResults[rk]; if(!list) return;
-        const filled=list.filter(m=>m.slot1.car||m.slot1.driver||m.slot2.car||m.slot2.driver);
-        if(filled.length) rounds[rk]=filled;
-      });
+      if(firstLive>=0) ROUND_KEYS.slice(firstLive).forEach(rk=>{ if(roundResults[rk]) rounds[rk]=roundResults[rk]; });
 
       const fm=rounds['F'];
       if(fm&&fm.length){
@@ -671,7 +848,10 @@
   /* --- render bracket for one category --- */
   function renderBracket(catData){
     const bracket=el('lbBracket');
-    if(!catData){ bracket.innerHTML='<div style="padding:20px;color:var(--muted);font-family:var(--font-mono);font-size:12px;">No data yet — ensure the sheet is published and has rows in A:Round B:Match C:Car1 D:Driver1 E:Time1 F:Car2 G:Driver2 H:Time2 I:Winner format.</div>'; return; }
+    const bempty=msg=>{ bracket.innerHTML='<div class="lb__bempty">'+msg+'</div>'; };
+    if(!catData){ bempty('No data yet — check the sheet is shared ("Anyone with link") and published to the web, and that the CONFIG cell references still match the tab layout.'); return; }
+    if(catData.error){ bempty(catData.error); return; }
+    if(!Object.keys(catData.rounds||{}).length){ bempty('Bracket not started yet.'); return; }
     const ROUND_LABELS={R16:'Round of 16', QF:'Quarter-Finals', SF:'Semi-Finals', F:'Finals'};
     const ROUNDS=['R16','QF','SF','F'];
     let html='';
