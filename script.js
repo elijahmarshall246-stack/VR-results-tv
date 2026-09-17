@@ -10,7 +10,10 @@
     // Overridden by the "QFTVSidebySide" key in the Settings sheet, which is
     // re-read on every poll — flipping the cell retargets a running TV session.
     qfTvSideBySide: true,
-    qfTvCycleMs: 12000,   // dwell per view when cycling (matches Knockout TV)
+    // Dwell per screen when cycling — used by BOTH Qualifying TV (Overall ⟷ Heats)
+    // and Knockout TV (category ⟶ category). Overridden by the "TVScreen Cycle"
+    // key in the Settings sheet, in SECONDS (e.g. 12).
+    qfTvCycleMs: 12000,
     // When a heat's time lands, that heat is held full-size on its own for this
     // long before the grid fades back. TV mode only.
     heatSpotMs: 15000,
@@ -23,7 +26,9 @@
     playAds: false,
     ads: {
       folder: 'ads',
-      imageMs: 15000,                                  // hold time per still image
+      // Hold time per still image. Overridden by the "TVAd Cycle" key in the
+      // Settings sheet, in SECONDS. Videos ignore it — they play to their end.
+      imageMs: 15000,
       imageExts: ['jpg','jpeg','png','webp','gif'],
       videoExts: ['mp4','webm','m4v'],                 // played to their natural end
       maxProbe: 60,        // highest adN we ever look for
@@ -536,6 +541,18 @@
      the buttons and refetch brackets. */
   function applySettings(s){
     const truthy=v=>/^(yes|true|1|on)$/i.test(String(v||'').trim());
+    /* Cycle times are entered in SECONDS ("12", "12s", "12 sec"). A value of 1000
+       or more is taken as milliseconds instead, so an operator who types 12000
+       still gets 12 seconds rather than a screen that never changes. Anything
+       unparseable or absurdly short is ignored and the current value stands. */
+    const cycleMs=v=>{
+      const n=parseFloat(String(v||'').replace(/[^0-9.]/g,''));
+      if(!isFinite(n)||n<=0) return null;
+      const ms=n>=1000?n:n*1000;
+      return ms>=1000?Math.round(ms):null;
+    };
+    if('tvscreencycle' in s){ const ms=cycleMs(s.tvscreencycle); if(ms) CONFIG.qfTvCycleMs=ms; }
+    if('tvadcycle' in s){ const ms=cycleMs(s.tvadcycle); if(ms) CONFIG.ads.imageMs=ms; }
     if(s.title){ const t=el('lbTitleName'); if(t) t.textContent=s.title; }
     if(s.date){ const d=el('lbDate'); if(d) d.textContent=s.date; }
     if('showwinner' in s) CONFIG.knockouts.showWinner=truthy(s.showwinner);
@@ -570,6 +587,7 @@
       }
       applyDisplayMode();
       applyQfLayout();
+      applyCycleTime();
       applyAdsMode();
     });
   }
@@ -645,10 +663,15 @@
     el('lbOverall').classList.toggle('qf-hidden', i!==0);
     el('lbHeats').classList.toggle('qf-hidden', i!==1);
     if(tvOn) requestAnimationFrame(i===0?scaleTvList:scaleTvHeats); }
-  function startQfCycle(){
-    root.classList.add('tvsolo'); setTvQf(0);
+  /* Separate from startQfCycle so the dwell time can be changed mid-session
+     without snapping the display back to Overall. */
+  function armQfCycle(){
     clearInterval(tvQfInterval);
     tvQfInterval=setInterval(()=>setTvQf((tvQfCat+1)%2), CONFIG.qfTvCycleMs);
+  }
+  function startQfCycle(){
+    root.classList.add('tvsolo'); setTvQf(0);
+    armQfCycle();
   }
   function stopQfCycle(){
     clearInterval(tvQfInterval); tvQfInterval=null;
@@ -664,6 +687,18 @@
     appliedQfSideBySide=CONFIG.qfTvSideBySide;
     if(CONFIG.qfTvSideBySide) stopQfCycle(); else startQfCycle();
     requestAnimationFrame(()=>{ scaleTvList(); scaleTvHeats(); });
+  }
+  /* Pushes a changed "TVScreen Cycle" into whichever cycle is running. Like
+     applyQfLayout it no-ops unless the value actually changed, so a running
+     dwell isn't restarted from zero on every ten-second settings poll.
+     (The ad cycle needs no equivalent: CONFIG.ads.imageMs is read when each
+     image goes up, so a new value takes effect on the next slide.) */
+  let appliedCycleMs=null;
+  function applyCycleTime(){
+    if(appliedCycleMs===CONFIG.qfTvCycleMs) return;
+    appliedCycleMs=CONFIG.qfTvCycleMs;
+    if(tvQfInterval) armQfCycle();
+    if(ktvInterval) armKtvCycle();
   }
   function enterTV(){ tvOn=true; root.classList.add('tv'); el('lbTitleSub').textContent='· Qualifying';
     appliedQfSideBySide=null; applyQfLayout(); applyAdsMode();
@@ -940,6 +975,14 @@
       label.style.opacity='1';
     },300);
   }
+  /* Same dwell as Qualifying TV, and re-armable mid-session (see armQfCycle). */
+  function armKtvCycle(){
+    clearInterval(ktvInterval);
+    ktvInterval=setInterval(()=>{
+      const next=(ktvCat+1)%((knockoutData&&knockoutData.length)||1);
+      setKtvCat(next);
+    }, CONFIG.qfTvCycleMs);
+  }
   function enterKnockoutTV(){
     ktvOn=true;
     setView(1);
@@ -947,10 +990,7 @@
     setKtvCat(0);
     applyAdsMode();
     showTvExit();
-    ktvInterval=setInterval(()=>{
-      const next=(ktvCat+1)%((knockoutData&&knockoutData.length)||1);
-      setKtvCat(next);
-    },12000);
+    armKtvCycle();
     if(root.requestFullscreen) root.requestFullscreen().catch(()=>{});
   }
   function exitKnockoutTV(keepFs){
